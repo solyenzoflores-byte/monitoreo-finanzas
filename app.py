@@ -383,19 +383,76 @@ with tab_strategy:
     st.title("🎯 Simulador de Estrategias y Gestión de Riesgo")
     if "strategy_legs" not in st.session_state:
         st.session_state["strategy_legs"] = []
+    available_underlyings = (
+        sorted(enriched_df["underlying"].dropna().unique()) if not enriched_df.empty else []
+    )
 
-            option_row = subset[(subset["otype"] == leg_type) & (subset["K"] == leg_strike)]
-            if option_row.empty:
-                st.warning("No se encontró información para ese strike; usando valores por defecto")
-                premium = 1.0
-                iv = 0.25
-                T_value = 30 / 365
+    with st.form("strategy_leg_form"):
+        col_underlying, col_type, col_position = st.columns(3)
+        with col_underlying:
+            if available_underlyings:
+                selected_underlying = st.selectbox("Subyacente", available_underlyings)
             else:
-                premium = float(option_row["mkt_price"].iloc[0])
-                iv = float(option_row["iv"].iloc[0])
-                T_value = float(option_row["T"].iloc[0]) if "T" in option_row.columns else 30 / 365
-                st.info(f"Precio actual: ${premium:.2f} | IV: {iv:.1%}")
-            if st.button("Agregar leg"):
+                st.selectbox("Subyacente", ["Sin datos disponibles"], disabled=True)
+                selected_underlying = ""
+        with col_type:
+            leg_type = st.selectbox("Tipo de opción", ["call", "put"])
+        with col_position:
+            leg_position = st.selectbox("Posición", ["long", "short"])
+
+        subset = (
+            enriched_df[enriched_df["underlying"] == selected_underlying]
+            if selected_underlying
+            else pd.DataFrame()
+        )
+        default_strike = float(subset["K"].iloc[0]) if not subset.empty else 0.0
+
+        col_strike, col_quantity = st.columns(2)
+        with col_strike:
+            leg_strike = st.number_input(
+                "Strike",
+                min_value=0.0,
+                value=default_strike,
+                step=1.0,
+                format="%.2f",
+            )
+        with col_quantity:
+            leg_quantity = st.number_input("Cantidad", min_value=1, value=1, step=1)
+
+        add_leg = st.form_submit_button("Agregar leg")
+
+        if add_leg:
+            if not selected_underlying:
+                st.warning("Selecciona un subyacente válido antes de agregar la leg.")
+            else:
+                if subset.empty:
+                    st.warning(
+                        "No hay datos de opciones para el subyacente seleccionado; se usarán valores por defecto."
+                    )
+                    option_row = pd.DataFrame()
+                else:
+                    option_row = subset[
+                        (subset["otype"] == leg_type) & (subset["K"] == leg_strike)
+                    ]
+                    if option_row.empty:
+                        st.warning(
+                            "No se encontró información para ese strike; usando valores por defecto"
+                        )
+
+                if option_row.empty:
+                    premium = 1.0
+                    iv = 0.25
+                    T_value = 30 / 365
+                else:
+                    premium = float(option_row["mkt_price"].iloc[0])
+                    iv = float(option_row["iv"].iloc[0])
+                    T_value = (
+                        float(option_row["T"].iloc[0])
+                        if "T" in option_row.columns
+                        else 30 / 365
+                    )
+                    st.info(f"Precio actual: ${premium:.2f} | IV: {iv:.1%}")
+
                 leg = StrategyLeg(
                     option_type=leg_type,
                     position=leg_position,

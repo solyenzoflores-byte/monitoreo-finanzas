@@ -66,10 +66,11 @@ def get_db() -> DatabaseManager:
 
 
 @st.cache_data(ttl=10)
-def load_market_data() -> tuple[pd.DataFrame, Dict[str, float]]:
+def load_market_data() -> tuple[pd.DataFrame, Dict[str, float], Dict[str, float]]:
     options_df = DataClient.fetch_filtered_options()
     underlying_prices = DataClient.get_underlying_prices()
-    return options_df, underlying_prices
+    fx_rates = DataClient.get_exchange_rates()
+    return options_df, underlying_prices, fx_rates
 
 
 def process_market_data(
@@ -81,6 +82,17 @@ def process_market_data(
     config = ProcessorConfig(risk_free_rate=risk_free_rate, dividend_yield=dividend_yield)
     processor = OptionsProcessor(options_df, underlying_prices, config)
     return processor.enrich_with_greeks()
+
+
+def pick_preferred_fx_rate(fx_rates: Dict[str, float]) -> float | None:
+    if not fx_rates:
+        return None
+    priority_keys = ("mep", "usd", "dolar", "dólar", "blue", "ccl", "oficial", "promedio")
+    for fragment in priority_keys:
+        for key, value in fx_rates.items():
+            if fragment in key.lower():
+                return value
+    return next(iter(fx_rates.values()), None)
 
 
 def show_greek_tooltip() -> None:
@@ -179,11 +191,28 @@ market_open = st.sidebar.time_input("🕘 Apertura mercado", value=datetime.strp
 market_close = st.sidebar.time_input("🕕 Cierre mercado", value=datetime.strptime("17:00", "%H:%M").time())
 
 with st.spinner("📡 Obteniendo datos del mercado..."):
-    options_df, underlying_prices = load_market_data()
+    options_df, underlying_prices, fx_rates = load_market_data()
 
 if options_df.empty:
     st.error("❌ No se pudieron obtener datos del mercado")
     st.stop()
+
+preferred_fx_rate = pick_preferred_fx_rate(fx_rates)
+default_exchange_value = (
+    float(preferred_fx_rate)
+    if preferred_fx_rate is not None and preferred_fx_rate > 0
+    else float(st.session_state.get("exchange_rate", 1000.0))
+)
+exchange_rate = st.sidebar.number_input(
+    "💱 Tipo de cambio (ARS/USD)",
+    min_value=0.0,
+    value=float(st.session_state.get("exchange_rate", default_exchange_value)),
+    step=1.0,
+    format="%.2f",
+)
+st.session_state["exchange_rate"] = float(exchange_rate)
+if preferred_fx_rate is not None:
+    st.sidebar.caption(f"Referencia de mercado (MEP/CCL): ${preferred_fx_rate:,.2f}")
 
 options_signature = dataframe_signature(options_df)
 cache_key = (options_signature, risk_free_rate, dividend_yield)
@@ -194,9 +223,19 @@ if "processed_cache" not in st.session_state or st.session_state["processed_cach
 else:
     enriched_df = st.session_state["processed_cache"]["data"].copy()
 
+target_underlyings = set(DataClient.TARGET_UNDERLYINGS.keys())
+has_underlying_data = (
+    not enriched_df.empty
+    and "underlying" in enriched_df.columns
+    and enriched_df["underlying"].isin(target_underlyings).any()
+)
+
 # Sidebar metrics
 st.sidebar.markdown("---")
 st.sidebar.subheader("📈 Estado del Mercado")
+st.sidebar.metric("Tipo de cambio utilizado", f"${exchange_rate:,.2f}")
+if preferred_fx_rate is not None:
+    st.sidebar.metric("Dólar referencia", f"${preferred_fx_rate:,.2f}")
 for underlying, price in underlying_prices.items():
     st.sidebar.metric(underlying, f"${price:.2f}")
 st.sidebar.metric("Contratos disponibles", len(enriched_df))
@@ -218,11 +257,13 @@ tab_dashboard, tab_analysis, tab_strategy, tab_database = st.tabs(
 with tab_dashboard:
     st.title("📊 Monitor de Opciones Americanas - Argentina")
     st.markdown("Análisis para **ALUA (ALU)**, **GGAL (GFG)** y **COME (COM)**")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Total Contratos", len(enriched_df))
     col2.metric("IV Promedio", f"{enriched_df['iv'].mean():.1%}" if not enriched_df.empty else "N/A")
     col3.metric("Volumen Total", f"{enriched_df.get('v', pd.Series(dtype=float)).sum():,.0f}")
     col4.metric("Open Interest", f"{enriched_df.get('oi', pd.Series(dtype=float)).sum():,.0f}")
+    exchange_metric_value = f"${exchange_rate:,.2f}" if exchange_rate > 0 else "N/A"
+    col5.metric("Tipo de cambio (ARS/USD)", exchange_metric_value)
 
 
     st.subheader("📋 Resumen por Subyacente")
@@ -236,11 +277,14 @@ with tab_dashboard:
                 continue
             calls = subset[subset["otype"] == "call"]
             puts = subset[subset["otype"] == "put"]
+            price_ars = float(underlying_prices.get(underlying, 0))
+            price_usd = price_ars / exchange_rate if exchange_rate and exchange_rate > 0 else np.nan
             summary_rows.append(
                 {
                     "Subyacente": underlying,
                     "Prefijo": DataClient.TARGET_UNDERLYINGS[underlying],
-                    "Precio": f"${underlying_prices.get(underlying, 0):.2f}",
+                    "Precio": f"${price_ars:.2f}",
+                    "Precio USD": f"U$D {price_usd:.2f}" if not np.isnan(price_usd) else "N/A",
                     "Calls": len(calls),
                     "Puts": len(puts),
                     "IV Calls": f"{calls['iv'].mean():.1%}" if not calls.empty else "N/A",
@@ -252,6 +296,115 @@ with tab_dashboard:
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
         else:
             st.info("No se encontraron datos para los subyacentes objetivo.")
+
+    st.subheader("💱 Tipo de cambio y liquidez")
+    fx_col1, fx_col2 = st.columns(2)
+    fx_col1.metric("Tipo de cambio utilizado", exchange_metric_value)
+    if preferred_fx_rate is not None:
+        fx_col2.metric("Referencia de mercado", f"${preferred_fx_rate:,.2f}")
+    elif fx_rates:
+        first_key, first_value = next(iter(fx_rates.items()))
+        fx_col2.metric(first_key, f"${first_value:,.2f}")
+    else:
+        with fx_col2:
+            st.info("Sin datos de referencia")
+
+    if fx_rates:
+        with st.expander("Ver detalle de tipos de cambio disponibles"):
+            fx_display = (
+                pd.DataFrame(
+                    [
+                        {"Fuente": key, "ARS por USD": float(value)}
+                        for key, value in fx_rates.items()
+                    ]
+                )
+                .sort_values("Fuente")
+                .reset_index(drop=True)
+            )
+            st.dataframe(
+                fx_display.style.format({"ARS por USD": "{:,.2f}"}),
+                use_container_width=True,
+            )
+
+    if "liquidity_ars" not in st.session_state:
+        st.session_state["liquidity_ars"] = 0.0
+    if "liquidity_usd" not in st.session_state:
+        st.session_state["liquidity_usd"] = 0.0
+
+    with st.expander("Configurar liquidez en ARS y USD", expanded=True):
+        col_liq_ars, col_liq_usd = st.columns(2)
+        ars_liquidity = col_liq_ars.number_input(
+            "Liquidez en pesos (ARS)",
+            min_value=0.0,
+            step=1000.0,
+            format="%.2f",
+            key="liquidity_ars",
+        )
+        usd_liquidity = col_liq_usd.number_input(
+            "Liquidez en dólares (USD)",
+            min_value=0.0,
+            step=10.0,
+            format="%.2f",
+            key="liquidity_usd",
+        )
+
+        if exchange_rate and exchange_rate > 0:
+            usd_in_ars = usd_liquidity * exchange_rate
+            total_ars = ars_liquidity + usd_in_ars
+            total_usd = total_ars / exchange_rate if exchange_rate else 0.0
+            composition_data = pd.DataFrame(
+                [
+                    {
+                        "Moneda": "ARS",
+                        "Monto nominal": ars_liquidity,
+                        "Equivalente ARS": ars_liquidity,
+                        "Equivalente USD": ars_liquidity / exchange_rate,
+                    },
+                    {
+                        "Moneda": "USD",
+                        "Monto nominal": usd_liquidity,
+                        "Equivalente ARS": usd_in_ars,
+                        "Equivalente USD": usd_liquidity,
+                    },
+                ]
+            )
+            if total_ars > 0:
+                composition_data["Participación (%)"] = (
+                    composition_data["Equivalente ARS"] / total_ars * 100.0
+                )
+            else:
+                composition_data["Participación (%)"] = 0.0
+
+            st.dataframe(
+                composition_data.style.format(
+                    {
+                        "Monto nominal": "{:,.2f}",
+                        "Equivalente ARS": "{:,.2f}",
+                        "Equivalente USD": "{:,.2f}",
+                        "Participación (%)": "{:,.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
+
+            summary_cols = st.columns(2)
+            summary_cols[0].metric("Total liquidez (ARS)", f"${total_ars:,.2f}")
+            summary_cols[1].metric("Total liquidez (USD)", f"U$D {total_usd:,.2f}")
+
+            usd_share = (
+                float(
+                    composition_data.loc[
+                        composition_data["Moneda"] == "USD", "Participación (%)"
+                    ].iloc[0]
+                )
+                if total_ars > 0
+                else 0.0
+            )
+            st.caption(
+                f"Los dólares equivalen a ${usd_in_ars:,.2f} y representan {usd_share:.2f}% de la liquidez total."
+            )
+        else:
+            st.info("Definí un tipo de cambio mayor que cero para calcular la composición.")
 
     current_time = datetime.now().time()
     if market_open <= current_time <= market_close:
@@ -280,6 +433,12 @@ with tab_analysis:
         if selected_underlying != "Todos":
             analysis_df = enriched_df[enriched_df["underlying"] == selected_underlying]
             current_price = underlying_prices.get(selected_underlying, 100.0)
+            if exchange_rate and exchange_rate > 0:
+                st.caption(
+                    f"Precio spot {selected_underlying}: ${current_price:.2f} | U$D {current_price / exchange_rate:.2f} (TC {exchange_rate:,.2f})"
+                )
+            else:
+                st.caption(f"Precio spot {selected_underlying}: ${current_price:.2f}")
         else:
             analysis_df = enriched_df
             current_price = np.nan
@@ -383,33 +542,34 @@ with tab_strategy:
     st.title("🎯 Simulador de Estrategias y Gestión de Riesgo")
     if "strategy_legs" not in st.session_state:
         st.session_state["strategy_legs"] = []
-
-            option_row = subset[(subset["otype"] == leg_type) & (subset["K"] == leg_strike)]
-            if option_row.empty:
-                st.warning("No se encontró información para ese strike; usando valores por defecto")
-                premium = 1.0
-                iv = 0.25
-                T_value = 30 / 365
-            else:
-                premium = float(option_row["mkt_price"].iloc[0])
-                iv = float(option_row["iv"].iloc[0])
-                T_value = float(option_row["T"].iloc[0]) if "T" in option_row.columns else 30 / 365
-                st.info(f"Precio actual: ${premium:.2f} | IV: {iv:.1%}")
-            if st.button("Agregar leg"):
-                leg = StrategyLeg(
-                    option_type=leg_type,
-                    position=leg_position,
-                    strike=float(leg_strike),
-                    premium=premium,
-                    quantity=int(leg_quantity),
-                    iv=iv,
-                    T_original=T_value,
-                    r=risk_free_rate,
-                    q=dividend_yield,
-                )
-                st.session_state["strategy_legs"].append(leg)
-                st.success("Leg agregado correctamente")
-                st.rerun()
+    # TODO: reconstruir panel de estrategias; bloque anterior deshabilitado temporalmente.
+    if False:  # pragma: no cover - mantiene el código previo sin ejecutarlo
+        option_row = subset[(subset["otype"] == leg_type) & (subset["K"] == leg_strike)]
+        if option_row.empty:
+            st.warning("No se encontró información para ese strike; usando valores por defecto")
+            premium = 1.0
+            iv = 0.25
+            T_value = 30 / 365
+        else:
+            premium = float(option_row["mkt_price"].iloc[0])
+            iv = float(option_row["iv"].iloc[0])
+            T_value = float(option_row["T"].iloc[0]) if "T" in option_row.columns else 30 / 365
+            st.info(f"Precio actual: ${premium:.2f} | IV: {iv:.1%}")
+        if st.button("Agregar leg"):
+            leg = StrategyLeg(
+                option_type=leg_type,
+                position=leg_position,
+                strike=float(leg_strike),
+                premium=premium,
+                quantity=int(leg_quantity),
+                iv=iv,
+                T_original=T_value,
+                r=risk_free_rate,
+                q=dividend_yield,
+            )
+            st.session_state["strategy_legs"].append(leg)
+            st.success("Leg agregado correctamente")
+            st.rerun()
 
 
 with tab_database:

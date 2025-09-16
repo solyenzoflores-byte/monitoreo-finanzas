@@ -36,10 +36,6 @@ def ingest_once(
     inserted_prices = database.save_underlying_prices(underlying_prices)
     LOGGER.info("Saved %s underlying price entries", inserted_prices)
 
-    if "underlying" not in enriched_df.columns:
-        LOGGER.warning("Processed dataframe is missing 'underlying' column; skipping option inserts")
-        return
-
     for underlying in DataClient.TARGET_UNDERLYINGS.keys():
         subset = enriched_df[enriched_df["underlying"] == underlying]
         if subset.empty:

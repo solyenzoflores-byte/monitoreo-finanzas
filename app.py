@@ -224,7 +224,6 @@ with tab_dashboard:
     col3.metric("Volumen Total", f"{enriched_df.get('v', pd.Series(dtype=float)).sum():,.0f}")
     col4.metric("Open Interest", f"{enriched_df.get('oi', pd.Series(dtype=float)).sum():,.0f}")
 
-    has_underlying_data = not enriched_df.empty and "underlying" in enriched_df.columns
 
     st.subheader("📋 Resumen por Subyacente")
     if not has_underlying_data:
@@ -385,25 +384,6 @@ with tab_strategy:
     if "strategy_legs" not in st.session_state:
         st.session_state["strategy_legs"] = []
 
-    underlyings = sorted(enriched_df["underlying"].dropna().unique())
-    if not underlyings:
-        st.info("No hay datos para construir estrategias")
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            selected_underlying = st.selectbox("Subyacente", underlyings)
-        with col2:
-            current_price = underlying_prices.get(selected_underlying, 100.0)
-            st.metric(f"Precio actual {selected_underlying}", f"${current_price:.2f}")
-
-        subset = enriched_df[enriched_df["underlying"] == selected_underlying]
-
-        with st.expander("➕ Agregar nuevo leg"):
-            leg_type = st.selectbox("Tipo", ["call", "put"], key="leg_type")
-            leg_position = st.selectbox("Posición", ["long", "short"], key="leg_position")
-            strikes = sorted(subset[subset["otype"] == leg_type]["K"].unique())
-            leg_strike = st.selectbox("Strike", strikes if strikes else [current_price], key="leg_strike")
-            leg_quantity = st.number_input("Cantidad", min_value=1, value=1, key="leg_quantity")
             option_row = subset[(subset["otype"] == leg_type) & (subset["K"] == leg_strike)]
             if option_row.empty:
                 st.warning("No se encontró información para ese strike; usando valores por defecto")
@@ -431,147 +411,6 @@ with tab_strategy:
                 st.success("Leg agregado correctamente")
                 st.rerun()
 
-        if st.session_state["strategy_legs"]:
-            legs = st.session_state["strategy_legs"]
-            st.subheader("📋 Legs actuales")
-            legs_df = pd.DataFrame([
-                {
-                    "Tipo": leg.option_type,
-                    "Posición": leg.position,
-                    "Strike": leg.strike,
-                    "Prima": leg.premium,
-                    "Cantidad": leg.quantity,
-                    "IV": leg.iv,
-                    "T": leg.T_original,
-                }
-                for leg in legs
-            ])
-            legs_df["Costo"] = [
-                leg.premium * leg.quantity * (1 if leg.position == "long" else -1) for leg in legs
-            ]
-            st.dataframe(legs_df, use_container_width=True)
-            total_cost = legs_df["Costo"].sum()
-            st.metric("Costo total", f"${total_cost:.2f}")
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("🗑️ Limpiar estrategia"):
-                    st.session_state["strategy_legs"] = []
-                    st.rerun()
-            with col_b:
-                analysis_mode = st.radio(
-                    "Modo de análisis",
-                    ["Al vencimiento", "Valor teórico (días específicos)"],
-                    horizontal=True,
-                )
-
-            price_min = st.number_input("Precio mínimo", value=current_price * 0.7)
-            price_max = st.number_input("Precio máximo", value=current_price * 1.3)
-            price_points = st.slider("Cantidad de puntos", 50, 200, 100)
-            price_grid = np.linspace(price_min, price_max, price_points)
-            days_ahead = 0
-            if analysis_mode == "Valor teórico (días específicos)":
-                days_ahead = st.slider("Días hacia adelante", 1, 90, 30)
-
-            payoff = np.array([sum(leg.payoff(price, days_ahead) for leg in legs) for price in price_grid])
-            render_payoff_chart(price_grid, payoff, current_price, days_ahead)
-
-            max_profit = payoff.max()
-            max_loss = payoff.min()
-            current_pnl = np.interp(current_price, price_grid, payoff)
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Ganancia máxima", f"${max_profit:.2f}")
-            col2.metric("Pérdida máxima", f"${max_loss:.2f}")
-            col3.metric("P&L actual", f"${current_pnl:.2f}")
-            roi = (current_pnl / abs(total_cost) * 100) if total_cost else 0
-            col4.metric("ROI", f"{roi:.1f}%")
-
-            st.subheader("🌪️ Sensibilidad a Volatilidad")
-            if days_ahead > 0:
-                vol_scenarios = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
-                fig_vol = go.Figure()
-                colors = ["blue", "green", "orange", "red", "purple", "brown"]
-                for idx, vol in enumerate(vol_scenarios):
-                    scenario_payoff = []
-                    for price in price_grid:
-                        pnl = 0.0
-                        for leg in legs:
-                            T_remaining = max(1 / 365, leg.T_original - days_ahead / 365)
-                            theo_price = binomial_tree_american(price, leg.strike, T_remaining, leg.r, leg.q, vol, leg.option_type)
-                            leg_pnl = theo_price - leg.premium
-                            if leg.position == "short":
-                                leg_pnl = -leg_pnl
-                            pnl += leg_pnl * leg.quantity
-                        scenario_payoff.append(pnl)
-                    fig_vol.add_trace(
-                        go.Scatter(
-                            x=price_grid,
-                            y=scenario_payoff,
-                            mode="lines",
-                            name=f"Vol {vol:.0%}",
-                            line=dict(color=colors[idx % len(colors)]),
-                        )
-                    )
-                fig_vol.add_hline(y=0, line_dash="dash", line_color="gray")
-                fig_vol.add_vline(x=current_price, line_dash="dot", line_color="black")
-                fig_vol.update_layout(
-                    title=f"Sensibilidad a volatilidad (en {days_ahead} días)",
-                    xaxis_title="Precio del subyacente",
-                    yaxis_title="P&L",
-                    height=450,
-                )
-                st.plotly_chart(fig_vol, use_container_width=True)
-
-            st.subheader("🎲 Simulación Monte Carlo")
-            simulations = st.number_input("Simulaciones", value=5000, step=1000)
-            days_mc = st.number_input("Días", value=30, step=5)
-            underlying_vol = st.number_input("Volatilidad subyacente", value=0.25, step=0.01)
-            if st.button("🚀 Ejecutar Monte Carlo"):
-                with st.spinner("Ejecutando simulación..."):
-                    pnls = monte_carlo_simulation(legs, current_price, int(simulations), int(days_mc), risk_free_rate, underlying_vol)
-                expected_return = pnls.mean()
-                volatility = pnls.std()
-                var_95 = np.percentile(pnls, 5)
-                var_99 = np.percentile(pnls, 1)
-                cvar_95 = pnls[pnls <= var_95].mean()
-                prob_profit = (pnls > 0).mean() * 100
-                col_a, col_b, col_c, col_d = st.columns(4)
-                col_a.metric("Retorno esperado", f"${expected_return:.2f}")
-                col_b.metric("Volatilidad", f"${volatility:.2f}")
-                col_c.metric("VaR 95%", f"${var_95:.2f}")
-                col_d.metric("Prob. ganancia", f"{prob_profit:.1f}%")
-                fig_hist = go.Figure()
-                fig_hist.add_histogram(x=pnls, nbinsx=50)
-                fig_hist.add_vline(x=expected_return, line_dash="dash", line_color="green", annotation_text="Media")
-                fig_hist.add_vline(x=var_95, line_dash="dot", line_color="red", annotation_text="VaR 95%")
-                fig_hist.update_layout(title="Distribución de P&L", xaxis_title="P&L", yaxis_title="Frecuencia", height=400)
-                st.plotly_chart(fig_hist, use_container_width=True)
-
-                metrics_df = pd.DataFrame(
-                    {
-                        "Métrica": [
-                            "Retorno esperado",
-                            "Volatilidad",
-                            "VaR 95%",
-                            "VaR 99%",
-                            "CVaR 95%",
-                            "Prob. ganancia",
-                            "Máx. ganancia",
-                            "Máx. pérdida",
-                        ],
-                        "Valor": [
-                            f"${expected_return:.2f}",
-                            f"${volatility:.2f}",
-                            f"${var_95:.2f}",
-                            f"${var_99:.2f}",
-                            f"${cvar_95:.2f}",
-                            f"{prob_profit:.1f}%",
-                            f"${pnls.max():.2f}",
-                            f"${pnls.min():.2f}",
-                        ],
-                    }
-                )
-                st.dataframe(metrics_df, use_container_width=True)
 
 with tab_database:
     st.title("📚 Base de Datos Histórica")

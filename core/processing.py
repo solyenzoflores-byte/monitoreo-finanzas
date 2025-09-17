@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import os
 
@@ -47,25 +47,85 @@ class OptionsProcessor:
             prefix_map = {v: k for k, v in self.underlying_prices_map().items()}
             self.df["underlying"] = self.df.get("option_root", pd.Series(dtype=str)).map(prefix_map)
 
-        if "symbol" in self.df.columns:
-            self.df["otype"] = self.df["symbol"].str[-1].map({"C": "call", "V": "put"})
+        parsed = self.df.apply(
+            lambda row: self._parse_symbol_metadata(row.get("symbol"), row.get("option_root")),
+            axis=1,
+            result_type="expand",
+        )
+        parsed = parsed.rename(columns={0: "_parsed_otype", 1: "_parsed_strike"})
 
+        parsed_option_types = parsed.get("_parsed_otype")
+        if parsed_option_types is not None:
+            if "otype" in self.df.columns:
+                self.df["otype"] = self.df["otype"].where(
+                    self.df["otype"].notna(), parsed_option_types
+                )
+            else:
+                self.df["otype"] = parsed_option_types
+
+        parsed_strikes = pd.to_numeric(parsed.get("_parsed_strike"), errors="coerce")
         if "strike" in self.df.columns:
-            self.df["K"] = pd.to_numeric(self.df["strike"], errors="coerce")
+            numeric_strike = pd.to_numeric(self.df["strike"], errors="coerce")
+            combined_strike = parsed_strikes.combine_first(numeric_strike)
         else:
-            self.df["K"] = pd.NA
+            combined_strike = parsed_strikes
 
-        if self.df["K"].isna().any():
-            extracted = self.df["symbol"].str.extract(r"(\d+)[CV]$")
-            self.df.loc[self.df["K"].isna(), "K"] = extracted[0].astype(float)
+        self.df["strike"] = combined_strike
+        self.df["K"] = pd.to_numeric(combined_strike, errors="coerce")
 
-        self.df["K"] = self.df["K"].astype(float)
 
         self.df["mkt_price"] = self.df.apply(self._market_price, axis=1)
         if "expiration" in self.df.columns:
             self.df["expiration"] = pd.to_datetime(self.df["expiration"], errors="coerce")
         else:
             self.df["expiration"] = pd.NaT
+
+    @staticmethod
+    def _parse_symbol_metadata(symbol: object, option_root: Optional[str]) -> Tuple[Optional[str], Optional[float]]:
+        if not isinstance(symbol, str):
+            return (None, None)
+
+        normalized = symbol.strip().upper()
+        root = (option_root or "").upper()
+        tail = normalized[len(root) :] if root and normalized.startswith(root) else normalized
+        if not tail:
+            return (None, None)
+
+        option_letter: Optional[str] = None
+        month_code: Optional[str] = None
+        digits_token: Optional[str] = None
+
+        first_char = tail[0]
+        last_char = tail[-1]
+
+        if first_char in {"C", "V"}:
+            option_letter = first_char
+            if len(tail) > 1:
+                if last_char.isalpha() and last_char not in {"C", "V"}:
+                    month_code = last_char
+                    digits_token = tail[1:-1]
+                else:
+                    digits_token = tail[1:]
+        else:
+            if last_char in {"C", "V"}:
+                option_letter = last_char
+                digits_token = tail[:-1]
+            else:
+                digits_token = "".join(ch for ch in tail if ch.isdigit()) or None
+                letters = [ch for ch in tail if ch.isalpha()]
+                if letters:
+                    candidate = letters[-1]
+                    if candidate not in {"C", "V"}:
+                        month_code = candidate
+
+        strike_value: Optional[float] = None
+        if digits_token and digits_token.isdigit():
+            strike_value = float(int(digits_token))
+            if month_code:
+                strike_value /= 10.0
+
+        option_type = {"C": "call", "V": "put"}.get(option_letter)
+        return (option_type, strike_value)
 
     @staticmethod
     def underlying_prices_map() -> Dict[str, str]:

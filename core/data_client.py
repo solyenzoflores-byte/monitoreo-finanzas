@@ -31,6 +31,7 @@ class DataClient:
     }
 
     _session = requests.Session()
+    _session.trust_env = False
     _cache: Dict[str, Dict[str, object]] = {}
     _lock = threading.Lock()
 

@@ -130,10 +130,14 @@ def get_db() -> DatabaseManager:
 
 
 @st.cache_data(ttl=10)
-def load_market_data() -> tuple[pd.DataFrame, Dict[str, float]]:
+def load_market_data() -> tuple[pd.DataFrame, Dict[str, float], Dict[str, Dict[str, object]]]:
     options_df = DataClient.fetch_filtered_options()
     underlying_prices = DataClient.get_underlying_prices()
-    return options_df, underlying_prices
+    fetch_meta: Dict[str, Dict[str, object]] = {
+        "options": DataClient.get_last_fetch_meta("Opciones"),
+        "stocks": DataClient.get_last_fetch_meta("Acciones"),
+    }
+    return options_df, underlying_prices, fetch_meta
 
 
 def process_market_data(
@@ -243,7 +247,31 @@ market_open = st.sidebar.time_input("🕘 Apertura mercado", value=datetime.strp
 market_close = st.sidebar.time_input("🕕 Cierre mercado", value=datetime.strptime("17:00", "%H:%M").time())
 
 with st.spinner("📡 Obteniendo datos del mercado..."):
-    options_df, underlying_prices = load_market_data()
+    options_df, underlying_prices, fetch_meta = load_market_data()
+
+options_fetch_meta = fetch_meta.get("options", {}) if fetch_meta else {}
+stocks_fetch_meta = fetch_meta.get("stocks", {}) if fetch_meta else {}
+
+if options_fetch_meta.get("fallback"):
+    fallback_source = options_fetch_meta.get("source", "fuente local")
+    last_error = options_fetch_meta.get("error")
+    warning_msg = f"Se cargaron datos locales de opciones desde {fallback_source}."
+    if last_error:
+        warning_msg += f" Último error remoto: {last_error}"
+    st.warning(warning_msg)
+elif options_fetch_meta.get("error") and not options_fetch_meta.get("source"):
+    st.error(
+        "No fue posible conectar con las fuentes remotas de opciones. "
+        "Intenta refrescar más tarde o configura una URL alternativa."
+    )
+
+if stocks_fetch_meta.get("fallback"):
+    stock_source = stocks_fetch_meta.get("source", "fuente local")
+    stock_error = stocks_fetch_meta.get("error")
+    info_msg = f"Se utilizaron precios locales de acciones desde {stock_source}."
+    if stock_error:
+        info_msg += f" Último error remoto: {stock_error}"
+    st.info(info_msg)
 
 if options_df.empty:
     st.error("❌ No se pudieron obtener datos del mercado")

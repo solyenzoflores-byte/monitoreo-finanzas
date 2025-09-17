@@ -33,6 +33,25 @@ analizar el payoff, sensibilidad a la volatilidad y ejecutar simulaciones
 Monte Carlo. La pestaña “Base de Datos Histórica” consulta registros
 guardados en SQLite.
 
+#### Fuentes de datos y fallbacks
+
+Por defecto las cotizaciones se descargan desde `data912.com`. Si el
+entorno impide acceder a ese dominio (por ejemplo, cuando solo se permite
+salir por GitHub), la aplicación cargará automáticamente un snapshot
+incluido en `core/sample_data`. Se mostrará un mensaje en la interfaz
+avisando que se está utilizando dicho respaldo y el motivo del error.
+
+Puedes definir endpoints alternativos mediante variables de entorno; por
+ejemplo:
+
+```bash
+export MONITOREO_OPCIONES_SOURCES="https://tu.dominio/live/arg_options.json"
+export MONITOREO_ACCIONES_SOURCES="https://tu.dominio/live/arg_stocks.json"
+```
+
+Los valores pueden contener varias URLs separadas por comas y se intentan
+en orden hasta conseguir una respuesta válida.
+
 ### Ingesta de datos históricos
 
 ```bash

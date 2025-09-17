@@ -22,6 +22,14 @@ def ingest_once(
 ) -> None:
     LOGGER.info("Fetching latest market data")
     options_df = DataClient.fetch_filtered_options(ttl=ttl)
+    options_meta = DataClient.get_last_fetch_meta("Opciones")
+    if options_meta.get("fallback"):
+        LOGGER.warning(
+            "Skipping ingestion cycle because only fallback option data is available (%s)",
+            options_meta.get("source"),
+        )
+        return
+
     underlying_prices = DataClient.get_underlying_prices(ttl=ttl)
     if options_df.empty:
         LOGGER.warning("No option data received from remote service")

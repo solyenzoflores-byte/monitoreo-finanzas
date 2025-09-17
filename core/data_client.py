@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Dict
 
 import pandas as pd
 import requests
+
+from .fallback_data import FALLBACK_DATASETS
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DataClient:
@@ -46,12 +52,27 @@ class DataClient:
             response.raise_for_status()
             payload = response.json()
             df = pd.DataFrame(payload)
-        except Exception:
-            df = pd.DataFrame()
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch data from %s: %s", url, exc)
+            df = cls._fallback_dataframe(url)
+        else:
+            if df.empty:
+                LOGGER.warning(
+                    "Remote service returned empty payload for %s; using fallback data",
+                    url,
+                )
+                df = cls._fallback_dataframe(url)
 
         with cls._lock:
             cls._cache[url] = {"timestamp": now, "data": df.copy()}
         return df
+
+    @classmethod
+    def _fallback_dataframe(cls, url: str) -> pd.DataFrame:
+        dataset = FALLBACK_DATASETS.get(url)
+        if not dataset:
+            return pd.DataFrame()
+        return pd.DataFrame(dataset)
 
     @classmethod
     def fetch_filtered_options(cls, ttl: int = 10) -> pd.DataFrame:

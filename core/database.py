@@ -131,6 +131,13 @@ class DatabaseManager:
         available = [c for c in columns if c in df.columns]
         records = []
         for _, row in df[available].iterrows():
+            expiration_value = row.get("expiration")
+            if pd.isna(expiration_value):
+                expiration_out = None
+            elif isinstance(expiration_value, pd.Timestamp):
+                expiration_out = expiration_value.to_pydatetime()
+            else:
+                expiration_out = expiration_value
             records.append(
                 (
                     timestamp,
@@ -138,7 +145,7 @@ class DatabaseManager:
                     underlying_symbol,
                     row.get("otype", ""),
                     row.get("K", 0.0),
-                    row.get("expiration"),
+                    expiration_out,
                     row.get("mkt_price", 0.0),
                     row.get("b", 0.0),
                     row.get("a", 0.0),

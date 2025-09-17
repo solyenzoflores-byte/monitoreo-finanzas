@@ -172,8 +172,11 @@ else:
     refresh_interval = 0
 
 with st.sidebar.expander("📊 Parámetros del Modelo"):
-    risk_free_rate = st.number_input("Tasa libre de riesgo (%)", value=5.0, step=0.1) / 100
-    dividend_yield = st.number_input("Rendimiento dividendos (%)", value=0.0, step=0.1) / 100
+    risk_free_rate_input = st.number_input("Tasa libre de riesgo (%)", value=5.0, step=0.1)
+    dividend_yield_input = st.number_input("Rendimiento dividendos (%)", value=0.0, step=0.1)
+
+risk_free_rate = float(risk_free_rate_input) / 100
+dividend_yield = float(dividend_yield_input) / 100
 
 market_open = st.sidebar.time_input("🕘 Apertura mercado", value=datetime.strptime("11:00", "%H:%M").time())
 market_close = st.sidebar.time_input("🕕 Cierre mercado", value=datetime.strptime("17:00", "%H:%M").time())
@@ -193,6 +196,14 @@ if "processed_cache" not in st.session_state or st.session_state["processed_cach
     st.session_state["processed_cache"] = {"key": cache_key, "data": enriched_df.copy()}
 else:
     enriched_df = st.session_state["processed_cache"]["data"].copy()
+
+if enriched_df.empty or "underlying" not in enriched_df.columns:
+    has_underlying_data = False
+else:
+    has_underlying_data = any(
+        not enriched_df[enriched_df["underlying"] == underlying].empty
+        for underlying in DataClient.TARGET_UNDERLYINGS.keys()
+    )
 
 # Sidebar metrics
 st.sidebar.markdown("---")

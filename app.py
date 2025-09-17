@@ -195,6 +195,12 @@ if "processed_cache" not in st.session_state or st.session_state["processed_cach
 else:
     enriched_df = st.session_state["processed_cache"]["data"].copy()
 
+has_underlying_data = bool(
+    not enriched_df.empty
+    and "underlying" in enriched_df.columns
+    and enriched_df["underlying"].notna().any()
+)
+
 # Sidebar metrics
 st.sidebar.markdown("---")
 st.sidebar.subheader("📈 Estado del Mercado")

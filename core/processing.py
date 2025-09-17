@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import os
 
@@ -47,17 +47,32 @@ class OptionsProcessor:
             prefix_map = {v: k for k, v in self.underlying_prices_map().items()}
             self.df["underlying"] = self.df.get("option_root", pd.Series(dtype=str)).map(prefix_map)
 
+        parsed_strikes = None
         if "symbol" in self.df.columns:
             self.df["otype"] = self.df["symbol"].str[-1].map({"C": "call", "V": "put"})
+            parsed = self.df.apply(
+                lambda row: self._parse_symbol(row.get("symbol"), row.get("option_root")),
+                axis=1,
+            )
+            self.df["expiration_code"] = parsed.str[0]
+            parsed_strikes = pd.to_numeric(parsed.str[1], errors="coerce")
 
         if "strike" in self.df.columns:
             self.df["K"] = pd.to_numeric(self.df["strike"], errors="coerce")
         else:
             self.df["K"] = pd.NA
 
+        if parsed_strikes is not None:
+            self.df["K"] = pd.to_numeric(self.df["K"], errors="coerce").fillna(parsed_strikes)
+
         if self.df["K"].isna().any():
-            extracted = self.df["symbol"].str.extract(r"(\d+)[CV]$")
-            self.df.loc[self.df["K"].isna(), "K"] = extracted[0].astype(float)
+            extracted = (
+                self.df["symbol"].str.extract(r"(\d+(?:[.,]\d+)?)[CV]$")[0]
+                if "symbol" in self.df.columns
+                else pd.Series(index=self.df.index, dtype=float)
+            )
+            extracted = pd.to_numeric(extracted.str.replace(",", ".", regex=False), errors="coerce")
+            self.df.loc[self.df["K"].isna(), "K"] = extracted[self.df["K"].isna()]
 
         self.df["K"] = self.df["K"].astype(float)
 
@@ -66,6 +81,31 @@ class OptionsProcessor:
             self.df["expiration"] = pd.to_datetime(self.df["expiration"], errors="coerce")
         else:
             self.df["expiration"] = pd.NaT
+
+    @staticmethod
+    def _parse_symbol(symbol: object, option_root: Optional[str]) -> Tuple[Optional[str], Optional[float]]:
+        if not isinstance(symbol, str):
+            return None, None
+        token = symbol.strip().upper()
+        root = (option_root or "").strip().upper()
+        if root and token.startswith(root):
+            token = token[len(root) :]
+        if not token:
+            return None, None
+        if token[-1] in {"C", "V"}:
+            token = token[:-1]
+        if not token:
+            return None, None
+        idx = 0
+        while idx < len(token) and token[idx].isalpha():
+            idx += 1
+        expiration_code = token[:idx] or None
+        strike_part = token[idx:].replace(",", ".")
+        try:
+            strike_value = float(strike_part) if strike_part else None
+        except ValueError:
+            strike_value = None
+        return expiration_code, strike_value
 
     @staticmethod
     def underlying_prices_map() -> Dict[str, str]:

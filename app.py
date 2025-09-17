@@ -20,6 +20,68 @@ from core.processing import OptionsProcessor, ProcessorConfig
 from core.models import binomial_tree_american
 
 
+MONTH_CODE_LABELS = {
+    "EN": "Enero",
+    "E": "Enero",
+    "FE": "Febrero",
+    "F": "Febrero",
+    "MR": "Marzo",
+    "MA": "Marzo",
+    "AB": "Abril",
+    "A": "Abril",
+    "MY": "Mayo",
+    "MYO": "Mayo",
+    "MAY": "Mayo",
+    "JN": "Junio",
+    "JU": "Junio",
+    "J": "Junio",
+    "JL": "Julio",
+    "AG": "Agosto",
+    "AGT": "Agosto",
+    "SP": "Septiembre",
+    "SE": "Septiembre",
+    "SEP": "Septiembre",
+    "OC": "Octubre",
+    "O": "Octubre",
+    "V": "Octubre",
+    "NV": "Noviembre",
+    "N": "Noviembre",
+    "X": "Noviembre",
+    "DI": "Diciembre",
+    "DE": "Diciembre",
+    "D": "Diciembre",
+    "Z": "Diciembre",
+}
+
+
+def format_expiration_label(value: object) -> str:
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return pd.Timestamp(value).strftime("%d-%b-%Y")
+    if isinstance(value, np.datetime64):
+        return pd.Timestamp(value).strftime("%d-%b-%Y")
+    if value is None:
+        return "Sin vencimiento"
+    if isinstance(value, str):
+        code = value.strip()
+        if not code:
+            return "Sin vencimiento"
+        code_upper = code.upper()
+    else:
+        if pd.isna(value):
+            return "Sin vencimiento"
+        code_upper = str(value).strip().upper()
+    if not code_upper:
+        return "Sin vencimiento"
+    label = MONTH_CODE_LABELS.get(code_upper)
+    if not label and len(code_upper) > 1:
+        label = MONTH_CODE_LABELS.get(code_upper[:2]) or MONTH_CODE_LABELS.get(code_upper[:1])
+    if label:
+        if label.upper() == code_upper:
+            return label.title()
+        return f"{label} ({code_upper})"
+    return code_upper
+
+
 st.set_page_config(
     page_title="Monitor de Opciones Pro - ARG",
     page_icon="📊",
@@ -30,6 +92,7 @@ st.set_page_config(
 
 @dataclass
 class StrategyLeg:
+    underlying: str
     option_type: str
     position: str
     strike: float
@@ -39,6 +102,7 @@ class StrategyLeg:
     T_original: float
     r: float
     q: float
+    expiration: str | None = None
 
     def payoff(self, price: float, days_ahead: int = 0) -> float:
         if days_ahead <= 0:
@@ -193,6 +257,12 @@ if "processed_cache" not in st.session_state or st.session_state["processed_cach
     st.session_state["processed_cache"] = {"key": cache_key, "data": enriched_df.copy()}
 else:
     enriched_df = st.session_state["processed_cache"]["data"].copy()
+
+has_underlying_data = bool(
+    not enriched_df.empty
+    and "underlying" in enriched_df.columns
+    and enriched_df["underlying"].notna().any()
+)
 
 # Sidebar metrics
 st.sidebar.markdown("---")
@@ -387,6 +457,9 @@ with tab_strategy:
         sorted(enriched_df["underlying"].dropna().unique()) if not enriched_df.empty else []
     )
 
+    st.markdown(
+        "Cada **leg** es una pierna de la estrategia: una combinación de subyacente, tipo de opción, posición y strike."
+    )
     with st.form("strategy_leg_form"):
         col_underlying, col_type, col_position = st.columns(3)
         with col_underlying:
@@ -405,19 +478,82 @@ with tab_strategy:
             if selected_underlying
             else pd.DataFrame()
         )
-        default_strike = float(subset["K"].iloc[0]) if not subset.empty else 0.0
+        subset_by_type = subset[subset["otype"] == leg_type] if not subset.empty else pd.DataFrame()
 
-        col_strike, col_quantity = st.columns(2)
+        expiration_field = None
+        expiration_options: list[object] = []
+        if not subset_by_type.empty:
+            if "expiration" in subset_by_type.columns and subset_by_type["expiration"].notna().any():
+                expiration_field = "expiration"
+                expiration_options = list(subset_by_type["expiration"].dropna().unique())
+                expiration_options = sorted(pd.to_datetime(expiration_options))
+            elif "expiration_code" in subset_by_type.columns and subset_by_type["expiration_code"].notna().any():
+                expiration_field = "expiration_code"
+                expiration_options = sorted(
+                    subset_by_type["expiration_code"].dropna().unique(),
+                    key=lambda val: str(val),
+                )
+
+        selected_expiration = None
+        filtered_subset = subset_by_type
+        option_row = pd.DataFrame()
+
+        col_expiration, col_strike, col_quantity = st.columns(3)
+        with col_expiration:
+            if expiration_options:
+                selected_expiration = st.selectbox(
+                    "Opex / Vencimiento",
+                    expiration_options,
+                    format_func=format_expiration_label,
+                )
+                if expiration_field == "expiration":
+                    filtered_subset = subset_by_type[subset_by_type["expiration"] == selected_expiration]
+                elif expiration_field == "expiration_code":
+                    filtered_subset = subset_by_type[
+                        subset_by_type["expiration_code"] == selected_expiration
+                    ]
+            else:
+                st.selectbox("Opex / Vencimiento", ["Sin vencimientos disponibles"], disabled=True)
+
         with col_strike:
-            leg_strike = st.number_input(
-                "Strike",
-                min_value=0.0,
-                value=default_strike,
-                step=1.0,
-                format="%.2f",
+            available_strikes = (
+                sorted(float(k) for k in filtered_subset["K"].dropna().unique())
+                if not filtered_subset.empty
+                else []
             )
+            if available_strikes:
+                leg_strike = st.selectbox(
+                    "Strike",
+                    available_strikes,
+                    format_func=lambda x: f"{x:.2f}",
+                )
+                option_row = filtered_subset[np.isclose(filtered_subset["K"], leg_strike)]
+            else:
+                st.selectbox("Strike", ["Sin strikes disponibles"], disabled=True)
+                leg_strike = None
+
         with col_quantity:
             leg_quantity = st.number_input("Cantidad", min_value=1, value=1, step=1)
+
+        selected_expiration_display = (
+            format_expiration_label(selected_expiration)
+            if selected_expiration is not None
+            else None
+        )
+
+        if not option_row.empty:
+            current_premium = float(option_row["mkt_price"].iloc[0])
+            current_iv = float(option_row["iv"].iloc[0])
+            extra = f" | Vto: {selected_expiration_display}" if selected_expiration_display else ""
+            st.caption(f"Prima estimada: ${current_premium:.2f} | IV: {current_iv:.1%}{extra}")
+        elif selected_underlying and leg_strike is not None:
+            st.caption(
+                "No se encontró prima para ese strike y vencimiento seleccionados. Se utilizarán valores por defecto al agregar la leg."
+            )
+        else:
+            st.caption(
+                "Seleccioná un subyacente, vencimiento y tipo de opción para ver los strikes disponibles."
+            )
 
         add_leg = st.form_submit_button("Agregar leg")
 
@@ -425,18 +561,18 @@ with tab_strategy:
             if not selected_underlying:
                 st.warning("Selecciona un subyacente válido antes de agregar la leg.")
             else:
-                if subset.empty:
+                if filtered_subset.empty or leg_strike is None:
                     st.warning(
-                        "No hay datos de opciones para el subyacente seleccionado; se usarán valores por defecto."
+                        "No hay datos de opciones para la combinación seleccionada; se usarán valores por defecto."
                     )
                     option_row = pd.DataFrame()
                 else:
-                    option_row = subset[
-                        (subset["otype"] == leg_type) & (subset["K"] == leg_strike)
+                    option_row = filtered_subset[
+                        np.isclose(filtered_subset["K"], leg_strike)
                     ]
                     if option_row.empty:
                         st.warning(
-                            "No se encontró información para ese strike; usando valores por defecto"
+                            "No se encontró información para ese strike y vencimiento; usando valores por defecto"
                         )
 
                 if option_row.empty:
@@ -451,9 +587,15 @@ with tab_strategy:
                         if "T" in option_row.columns
                         else 30 / 365
                     )
-                    st.info(f"Precio actual: ${premium:.2f} | IV: {iv:.1%}")
+                    extra = (
+                        f" | Vto: {selected_expiration_display}"
+                        if selected_expiration_display
+                        else ""
+                    )
+                    st.info(f"Precio actual: ${premium:.2f} | IV: {iv:.1%}{extra}")
 
                 leg = StrategyLeg(
+                    underlying=selected_underlying,
                     option_type=leg_type,
                     position=leg_position,
                     strike=float(leg_strike),
@@ -463,10 +605,135 @@ with tab_strategy:
                     T_original=T_value,
                     r=risk_free_rate,
                     q=dividend_yield,
+                    expiration=selected_expiration_display,
                 )
                 st.session_state["strategy_legs"].append(leg)
                 st.success("Leg agregado correctamente")
                 st.rerun()
+
+    strategy_legs = st.session_state.get("strategy_legs", [])
+
+    if strategy_legs:
+        st.markdown("---")
+        st.subheader("Estrategia actual")
+
+        legs_summary = []
+        for idx, leg in enumerate(strategy_legs, start=1):
+            legs_summary.append(
+                {
+                    "#": idx,
+                    "Subyacente": leg.underlying,
+                    "Tipo": leg.option_type,
+                    "Posición": leg.position,
+                    "Strike": f"{leg.strike:.2f}",
+                    "Prima": f"${leg.premium:.2f}",
+                    "Cantidad": leg.quantity,
+                    "IV": f"{leg.iv:.1%}",
+                    "Vencimiento": getattr(leg, "expiration", None) or "N/A",
+                }
+            )
+        st.dataframe(pd.DataFrame(legs_summary), use_container_width=True)
+
+        for idx, leg in enumerate(list(strategy_legs)):
+            cols = st.columns([3, 1])
+            with cols[0]:
+                st.markdown(
+                    f"**Leg {idx + 1}:** {leg.underlying} | {leg.position.upper()} {leg.option_type.upper()}"
+                    f" @ {leg.strike:.2f} × {leg.quantity}"
+                )
+            with cols[1]:
+                if st.button("Eliminar", key=f"remove_leg_{idx}"):
+                    st.session_state["strategy_legs"].pop(idx)
+                    st.info("Leg eliminada")
+                    st.rerun()
+
+        col_reset, _ = st.columns([1, 3])
+        with col_reset:
+            if st.button("🗑️ Limpiar estrategia"):
+                st.session_state["strategy_legs"] = []
+                st.success("Estrategia reiniciada")
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("Payoff y simulación")
+
+        strategy_underlyings = sorted({leg.underlying for leg in strategy_legs if leg.underlying})
+        if not strategy_underlyings:
+            st.warning("Las legs agregadas no tienen un subyacente asociado.")
+            selected_strategy_legs = []
+        else:
+            selected_strategy_underlying = st.selectbox(
+                "Elegí el subyacente a analizar",
+                strategy_underlyings,
+                help="Solo se mostrarán las legs asociadas al subyacente elegido.",
+            )
+
+            selected_strategy_legs = [
+                leg for leg in strategy_legs if leg.underlying == selected_strategy_underlying
+            ]
+
+        if selected_strategy_legs:
+            current_price = underlying_prices.get(
+                selected_strategy_underlying,
+                float(np.mean([leg.strike for leg in selected_strategy_legs])),
+            )
+            strikes = [leg.strike for leg in selected_strategy_legs]
+            price_min = max(0.01, min(strikes + [current_price]) * 0.7)
+            price_max = max(strikes + [current_price]) * 1.3
+            if price_max <= price_min:
+                price_max = price_min * 1.5
+            prices = np.linspace(price_min, price_max, 200)
+
+            days_ahead = st.slider("Días hacia adelante", 0, 180, 0, key="payoff_days")
+            payoff = np.array(
+                [
+                    sum(leg.payoff(price, days_ahead) for leg in selected_strategy_legs)
+                    for price in prices
+                ]
+            )
+            render_payoff_chart(prices, payoff, current_price, days_ahead)
+
+            st.markdown("#### Monte Carlo")
+            simulations = st.slider("Cantidad de simulaciones", 100, 5000, 1000, step=100)
+            horizon_days = st.slider("Horizonte (días)", 1, 180, 30, key="mc_days")
+            default_vol = float(np.mean([leg.iv for leg in selected_strategy_legs]) * 100)
+            underlying_vol = (
+                st.number_input(
+                    "Volatilidad anualizada del subyacente (%)",
+                    min_value=1.0,
+                    value=default_vol if default_vol > 0 else 30.0,
+                    step=0.5,
+                )
+                / 100
+            )
+
+            if st.button("Ejecutar simulación"):
+                pnls = monte_carlo_simulation(
+                    selected_strategy_legs,
+                    current_price,
+                    simulations,
+                    horizon_days,
+                    risk_free_rate,
+                    underlying_vol,
+                )
+                st.success("Simulación completada")
+
+                col_metrics = st.columns(3)
+                col_metrics[0].metric("P&L esperado", f"${np.mean(pnls):.2f}")
+                col_metrics[1].metric("P&L peor caso", f"${np.min(pnls):.2f}")
+                prob_positive = (pnls > 0).mean()
+                col_metrics[2].metric("Prob. P&L positivo", f"{prob_positive:.1%}")
+
+                hist_fig = go.Figure()
+                hist_fig.add_trace(go.Histogram(x=pnls, nbinsx=30))
+                hist_fig.update_layout(
+                    title="Distribución de P&L simulado",
+                    xaxis_title="P&L",
+                    yaxis_title="Frecuencia",
+                )
+                st.plotly_chart(hist_fig, use_container_width=True)
+        else:
+            st.info("Agregá legs del subyacente seleccionado para generar el payoff y la simulación.")
 
 
 with tab_database:
